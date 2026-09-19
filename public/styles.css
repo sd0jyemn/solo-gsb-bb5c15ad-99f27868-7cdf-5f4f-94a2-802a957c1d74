@@ -238,6 +238,33 @@ code {
   background: var(--ok-bg); border-radius: 8px;
 }
 
+/* ---------- 分析基线 / 对比 ---------- */
+.baseline-bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+.baseline-info { font-size: 11px; color: var(--muted); line-height: 1.5; margin-bottom: 8px; }
+.diff-panel {
+  border: 1px solid var(--border); border-radius: 8px; padding: 9px;
+  margin-bottom: 10px; background: #fbfcfe;
+}
+.diff-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.diff-summary { font-size: 12px; font-weight: 600; line-height: 1.6; }
+.diff-filters { display: flex; gap: 5px; flex-wrap: wrap; margin: 8px 0; }
+.chip {
+  border: 1px solid var(--border); background: #fff; border-radius: 12px;
+  padding: 2px 10px; font-size: 11px; cursor: pointer; color: var(--muted);
+  transition: background .12s, border-color .12s;
+}
+.chip:hover { border-color: var(--primary); }
+.chip.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.diff-list { max-height: 220px; overflow: auto; }
+.diff-item .ii-head { display: flex; gap: 6px; align-items: center; margin-bottom: 3px; }
+.diff-item .ii-head .ii-type { margin-bottom: 0; color: var(--muted); }
+.diff-item.st-new { border-left: 3px solid var(--danger); }
+.diff-item.st-fixed { border-left: 3px solid var(--ok); }
+.diff-item.st-changed { border-left: 3px solid var(--warning); }
+.diff-item.st-ongoing { border-left: 3px solid #b8c4d8; }
+.issue-item.active-issue { border-color: var(--primary); background: var(--info-bg); }
+.path-subhead { font-size: 11px; font-weight: 700; color: var(--muted); margin: 10px 0 4px; }
+
 .detail-card { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .detail-message { font-size: 13px; line-height: 1.5; margin: 0 0 12px; }
 .detail-section { margin-bottom: 14px; }

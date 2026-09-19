@@ -107,6 +107,20 @@
           <button id="btnAnalyze" class="btn btn-small btn-primary">重新分析</button>
         </div>
         <div id="analysisStats" class="stats"></div>
+        <div class="baseline-bar">
+          <button id="btnSaveBaseline" class="btn btn-small" title="将当前分析结果保存为基线（随剧情 JSON 持久化）">📌 保存基线</button>
+          <button id="btnCompareBaseline" class="btn btn-small" title="将当前分析结果与已保存的基线对比">🔍 对比基线</button>
+          <button id="btnClearBaseline" class="btn btn-small btn-danger" title="清除已保存的基线" hidden>🗑</button>
+        </div>
+        <div id="baselineInfo" class="baseline-info"></div>
+        <div id="diffPanel" class="diff-panel" hidden>
+          <div class="diff-head">
+            <span id="diffSummary" class="diff-summary"></span>
+            <button id="btnCloseDiff" class="btn btn-small" title="关闭对比结果">✕</button>
+          </div>
+          <div id="diffFilters" class="diff-filters"></div>
+          <ul id="diffList" class="issue-list diff-list"></ul>
+        </div>
         <ul id="issueList" class="issue-list"></ul>
       </section>
 

@@ -4,6 +4,7 @@ const express = require('express');
 const path = require('path');
 const storage = require('./src/storage');
 const { analyze } = require('./src/analyzer');
+const { buildBaseline, diffAnalyses } = require('./src/baseline');
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));
@@ -51,6 +52,48 @@ app.get('/api/stories/:id/analysis', wrap((req, res) => {
   const story = storage.getStory(req.params.id);
   if (!story) return res.status(404).json({ error: '剧情不存在' });
   res.json(analyze(story));
+}));
+
+// ---- 保存分析基线：对请求体中的草稿（或缺省时对已保存剧情）分析后，随剧情 JSON 持久化 ----
+app.post('/api/stories/:id/baseline', wrap((req, res) => {
+  const story = storage.getStory(req.params.id);
+  if (!story) return res.status(404).json({ error: '剧情不存在' });
+  const draft = req.body && Array.isArray(req.body.scenes) ? req.body : story;
+  const baseline = buildBaseline(analyze(draft), draft);
+  storage.saveBaseline(req.params.id, baseline);
+  res.status(201).json({ baseline });
+}));
+
+// ---- 读取已保存的分析基线 ----
+app.get('/api/stories/:id/baseline', wrap((req, res) => {
+  const story = storage.getStory(req.params.id);
+  if (!story) return res.status(404).json({ error: '剧情不存在' });
+  if (!story.baseline) return res.status(404).json({ error: '尚未保存分析基线' });
+  res.json({ baseline: story.baseline });
+}));
+
+// ---- 清除分析基线 ----
+app.delete('/api/stories/:id/baseline', wrap((req, res) => {
+  storage.clearBaseline(req.params.id);
+  res.status(204).end();
+}));
+
+// ---- 基线对比：基线 vs 请求体中的草稿（或缺省时对已保存剧情）----
+app.post('/api/stories/:id/compare', wrap((req, res) => {
+  const story = storage.getStory(req.params.id);
+  if (!story) return res.status(404).json({ error: '剧情不存在' });
+  if (!story.baseline) return res.status(404).json({ error: '尚未保存分析基线，请先保存基线' });
+  const draft = req.body && Array.isArray(req.body.scenes) ? req.body : story;
+  const current = analyze(draft);
+  const diff = diffAnalyses(story.baseline, current.issues);
+  res.json({
+    baseline: {
+      savedAt: story.baseline.savedAt,
+      storyTitle: story.baseline.storyTitle,
+      counts: story.baseline.counts,
+    },
+    ...diff,
+  });
 }));
 
 // ---- 导出 ----

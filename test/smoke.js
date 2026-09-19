@@ -152,4 +152,73 @@ const ntIssue = rd.issues.find((i) => i.type === 'neverTrueOption');
 ok('neverTrueOption 附带路径与解释', ntIssue.path.length >= 2 && ntIssue.unmet);
 ok('解释建议翻转 gateOpen', ntIssue.unmet.flip.includes('gateOpen'));
 
+// ---------- 分析器为基线提供的结构化字段（增量、兼容） ----------
+console.log('结构化定位字段：');
+const orphanIssue = r4.issues.find((i) => i.type === 'orphanOption');
+ok('orphanOption 携带关键目标 targetSceneId', orphanIssue.targetSceneId === 'ghost');
+const uvIssue = rd.issues.find((i) => i.type === 'error' && i.code === 'unknownVar');
+ok('unknownVar 携带 where 与 varName', uvIssue && uvIssue.varName === 'gateOpen' && /castle/.test(uvIssue.where));
+
+// ---------- 分析基线：稳定指纹与对比 ----------
+console.log('分析基线：');
+const { fingerprintIssues, buildBaseline, diffAnalyses } = require('../src/baseline');
+
+const baseAnalysis = analyze(demo);
+const base = buildBaseline(baseAnalysis, demo);
+ok('基线覆盖全部问题', base.issues.length === baseAnalysis.issues.length && base.issues.length > 0);
+ok('指纹为非空字符串', base.issues.every((e) => typeof e.fingerprint === 'string' && e.fingerprint.length > 0));
+
+// 指纹不依赖问题数组顺序
+const fpA = fingerprintIssues(baseAnalysis.issues).map((e) => e.fingerprint).sort().join('\n');
+const fpB = fingerprintIssues([...baseAnalysis.issues].reverse()).map((e) => e.fingerprint).sort().join('\n');
+ok('指纹不依赖问题数组顺序', fpA === fpB);
+
+// 指纹不依赖剧情 JSON 中场景数组的顺序
+const reordered = { ...demo, scenes: [...demo.scenes].reverse() };
+const fpC = fingerprintIssues(analyze(reordered).issues).map((e) => e.fingerprint).sort().join('\n');
+ok('指纹不依赖场景数组顺序', fpA === fpC);
+
+// 与自身对比：全部仍存在
+const selfDiff = diffAnalyses(base, baseAnalysis.issues);
+ok('与自身对比全部仍存在', selfDiff.summary.ongoing === base.issues.length
+  && selfDiff.summary.new === 0 && selfDiff.summary.fixed === 0 && selfDiff.summary.changed === 0);
+
+// 修复问题 → 已修复
+const fixedStory = JSON.parse(JSON.stringify(demo));
+fixedStory.scenes.find((s) => s.id === 'ending').options[0].target = 'village'; // 修复悬空跳转
+const fixedDiff = diffAnalyses(base, analyze(fixedStory).issues);
+const orphanFixed = fixedDiff.entries.find((e) => e.type === 'orphanOption');
+ok('修复悬空跳转 → 已修复', orphanFixed && orphanFixed.status === 'fixed' && fixedDiff.summary.fixed === 1);
+ok('已修复条目保留基线详情', orphanFixed.baselineIssue && orphanFixed.baselineIssue.path.length > 0 && !orphanFixed.currentIssue);
+
+// 新增问题 → 新增
+const worseStory = JSON.parse(JSON.stringify(demo));
+worseStory.scenes.find((s) => s.id === 'village').options.push({ text: '跳入虚空', condition: '', target: 'void', assigns: [] });
+const worseDiff = diffAnalyses(base, analyze(worseStory).issues);
+const newEntry = worseDiff.entries.find((e) => e.status === 'new');
+ok('新增悬空跳转 → 新增', newEntry && newEntry.type === 'orphanOption' && newEntry.sceneId === 'village');
+ok('新增条目只有当前详情', newEntry.currentIssue && !newEntry.baselineIssue);
+
+// 同一问题仅文案变化 → 详情变化（保留前后路径）
+const tweaked = JSON.parse(JSON.stringify(demo));
+tweaked.scenes.find((s) => s.id === 'castle').options[0].text = '破门而入'; // 恒假选项的文案
+const tweakDiff = diffAnalyses(base, analyze(tweaked).issues);
+const changedEntry = tweakDiff.entries.find((e) => e.status === 'changed');
+ok('选项文案变化 → 详情变化', changedEntry && changedEntry.type === 'neverTrueOption' && changedEntry.sceneId === 'castle');
+ok('详情变化保留前后路径与文案', changedEntry.baselineIssue && changedEntry.currentIssue
+  && changedEntry.baselineIssue.message !== changedEntry.currentIssue.message
+  && Array.isArray(changedEntry.baselineIssue.path) && Array.isArray(changedEntry.currentIssue.path));
+ok('其余问题仍存在', tweakDiff.summary.ongoing === base.issues.length - 1
+  && tweakDiff.summary.new === 0 && tweakDiff.summary.fixed === 0);
+ok('汇总计数自洽', tweakDiff.summary.new + tweakDiff.summary.fixed
+  + tweakDiff.summary.changed + tweakDiff.summary.ongoing === tweakDiff.entries.length
+  && tweakDiff.summary.baselineTotal === base.issues.length);
+
+// ---------- 基线随剧情 JSON 持久化（normalize 透传） ----------
+const storage = require('../src/storage');
+const withBaseline = storage.normalize({ title: 'x', scenes: [], baseline: base });
+ok('normalize 保留合法 baseline', withBaseline.baseline && withBaseline.baseline.issues.length === base.issues.length);
+ok('无 baseline 时不产生该字段', !('baseline' in storage.normalize({ title: 'x', scenes: [] })));
+ok('非法 baseline 被丢弃', !('baseline' in storage.normalize({ title: 'x', scenes: [], baseline: { foo: 1 } })));
+
 console.log(`\n全部 ${passed} 项断言通过 ✔`);

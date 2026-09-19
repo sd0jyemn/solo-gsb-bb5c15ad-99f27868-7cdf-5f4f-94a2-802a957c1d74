@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { sanitizeBaseline } = require('./baseline');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const SAMPLES_DIR = process.env.SAMPLES_DIR || path.join(__dirname, '..', 'samples');
@@ -82,6 +83,8 @@ function updateStory(id, story) {
     id,
     createdAt: existing.createdAt,
     updatedAt: new Date().toISOString(),
+    // 保存剧情时保留已存在的分析基线（除非请求显式携带 baseline 字段）
+    baseline: story.baseline !== undefined ? story.baseline : existing.baseline,
   });
   writeAtomic(storyPath(id), record);
   return record;
@@ -91,6 +94,27 @@ function deleteStory(id) {
   const p = storyPath(id);
   if (!fs.existsSync(p)) throw Object.assign(new Error('剧情不存在'), { status: 404 });
   fs.unlinkSync(p);
+}
+
+/** 把分析基线写入剧情记录（不改动剧情内容与 updatedAt） */
+function saveBaseline(id, baseline) {
+  const existing = getStory(id);
+  if (!existing) throw Object.assign(new Error('剧情不存在'), { status: 404 });
+  const sanitized = sanitizeBaseline(baseline);
+  if (!sanitized) throw Object.assign(new Error('基线数据不合法'), { status: 400 });
+  const record = { ...existing, baseline: sanitized };
+  writeAtomic(storyPath(id), record);
+  return record;
+}
+
+/** 清除剧情记录中的分析基线 */
+function clearBaseline(id) {
+  const existing = getStory(id);
+  if (!existing) throw Object.assign(new Error('剧情不存在'), { status: 404 });
+  const record = { ...existing };
+  delete record.baseline;
+  writeAtomic(storyPath(id), record);
+  return record;
 }
 
 /** 规整化：只保留受支持的字段，补齐结构，避免脏数据写入 */
@@ -118,7 +142,7 @@ function normalize(input) {
     })),
   }));
 
-  return {
+  const record = {
     id: input.id,
     title: input.title || '未命名剧情',
     description: input.description || '',
@@ -128,6 +152,10 @@ function normalize(input) {
     createdAt: input.createdAt,
     updatedAt: input.updatedAt,
   };
+  // 分析基线随剧情 JSON 持久化；无基线或基线不合法时不产生该字段
+  const baseline = sanitizeBaseline(input.baseline);
+  if (baseline) record.baseline = baseline;
+  return record;
 }
 
 /** 首次启动：当数据目录为空时，把 samples/ 下的示例播种进来 */
@@ -161,6 +189,8 @@ module.exports = {
   createStory,
   updateStory,
   deleteStory,
+  saveBaseline,
+  clearBaseline,
   normalize,
   seedSamples,
   newId,

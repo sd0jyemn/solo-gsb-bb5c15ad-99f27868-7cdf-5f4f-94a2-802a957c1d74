@@ -77,7 +77,7 @@ function compileAll(story, knownVars) {
     for (const v of compiled.vars()) {
       if (!knownVars.includes(v)) {
         errors.push({
-          type: 'error', severity: 'warning', code: 'unknownVar', where,
+          type: 'error', severity: 'warning', code: 'unknownVar', where, varName: v,
           message: `引用了未声明且从未赋值的变量 "${v}"，它将永远为 false`,
         });
       }
@@ -396,6 +396,7 @@ function analyze(storyInput) {
         severity: 'error',
         sceneId: od.sceneId,
         optionIndex: od.index,
+        targetSceneId: targetId, // 关键目标（可能为空或指向不存在的场景），供稳定指纹使用
         message: targetId
           ? `选项 "${optionLabel}" 指向不存在的场景 "${targetId}"（悬空跳转）`
           : `选项 "${optionLabel}" 没有设置目标场景`,
@@ -461,11 +462,14 @@ function analyze(storyInput) {
   }
 
   // 结构性 / 语法错误置于最前（它们可能导致其他分析结果失真）
+  // where / varName 为结构化定位信息，供基线稳定指纹使用（纯新增字段，保持 API 兼容）
   for (const e of errors) {
     issues.push({
       type: 'error',
       severity: e.severity || 'error',
       code: e.code,
+      where: e.where,
+      varName: e.varName,
       message: e.where ? `${e.where}：${e.message}` : e.message,
       path: [],
       distance: -1,

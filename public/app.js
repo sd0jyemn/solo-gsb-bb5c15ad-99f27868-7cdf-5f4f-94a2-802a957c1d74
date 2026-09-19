@@ -8,6 +8,9 @@ const state = {
   story: null,          // 当前剧情（编辑中的草稿）
   currentId: null,      // 当前选中场景 ID
   analysis: null,       // 最近一次分析结果
+  baseline: null,       // 当前剧情已保存的分析基线
+  diff: null,           // 最近一次基线对比结果
+  diffFilter: 'all',    // 对比结果的状态筛选
   dirty: false,
   saving: false,
 };
@@ -55,6 +58,9 @@ async function loadList(selectId) {
 async function openStory(id) {
   state.story = await api('GET', `/api/stories/${id}`);
   state.currentId = state.story.startScene || (state.story.scenes[0] && state.story.scenes[0].id) || null;
+  state.baseline = state.story.baseline || null;
+  state.diff = null;
+  state.diffFilter = 'all';
   state.dirty = false;
   $('storySelect').value = id;
   renderAll();
@@ -89,10 +95,12 @@ async function saveStory() {
   try {
     const saved = await api('PUT', `/api/stories/${state.story.id}`, state.story);
     state.story = saved;
+    state.baseline = saved.baseline || null; // 基线随剧情持久化，保存后与服务端保持一致
     state.dirty = false;
     renderMeta();
     renderSceneList();
     renderSaveStatus();
+    renderBaseline();
     toast('已保存');
     await runAnalysis(false);
   } catch (e) {
@@ -108,6 +116,8 @@ async function deleteStory() {
   await api('DELETE', `/api/stories/${state.story.id}`);
   state.story = null;
   state.analysis = null;
+  state.baseline = null;
+  state.diff = null;
   const next = await loadList();
   if (next) await openStory(next);
   else { renderAll(); toast('已删除'); }
@@ -130,6 +140,7 @@ function importStory(file) {
       delete data.id; // 导入总是创建新剧情，避免覆盖
       delete data.createdAt;
       delete data.updatedAt;
+      delete data.baseline; // 基线属于原剧情的审校历史，不随导入复制
       const created = await api('POST', '/api/stories', data);
       toast('导入成功');
       await refreshAndOpen(created.id);
@@ -151,6 +162,8 @@ function renderAll() {
   renderEditor();
   renderSaveStatus();
   renderAnalysis();
+  renderBaseline();
+  renderDiff();
   renderDetail(null);
 }
 
@@ -543,7 +556,8 @@ function renderAnalysis() {
  * 问题详情：最近可达路径 + 未满足条件
  * ============================================================ */
 function stateChips(stateObj, knownVars) {
-  const vars = knownVars.length ? knownVars : Object.keys(stateObj || {});
+  // 取当前变量与路径状态中实际出现的变量的并集（基线快照里可能含已删除的变量）
+  const vars = [...new Set([...(knownVars || []), ...Object.keys(stateObj || {})])];
   return `<div class="state-chips">` + vars.map((v) => {
     const on = !!(stateObj && stateObj[v]);
     return `<span class="state-chip ${on ? 'true' : 'false'}">${on ? '✓' : '✗'} ${v}</span>`;
@@ -556,80 +570,83 @@ function renderDetail(issue) {
   panel.hidden = false;
   $('detailTitle').textContent = (ISSUE_META[issue.type] || { label: '问题' }).label;
   $('detailMessage').textContent = issue.message;
-
-  // 路径
   const pathBox = $('detailPath');
   pathBox.innerHTML = '';
-  if (!issue.path || !issue.path.length) {
-    pathBox.innerHTML = `<div class="path-node scene blocked">
+  appendPathNodes(pathBox, issue.path);
+  renderUnmet(issue);
+}
+
+/** 把一条可达路径渲染到容器中（问题详情与基线对比的前后路径共用） */
+function appendPathNodes(pathBox, path) {
+  if (!path || !path.length) {
+    pathBox.insertAdjacentHTML('beforeend', `<div class="path-node scene blocked">
       <span class="pn-title">∅ 没有任何可达路径通向此处</span>
       <div style="font-size:11px;color:var(--muted);margin-top:3px">从起点出发，不存在任何选项链可以到达该场景（可能是孤岛场景）。</div>
-    </div>`;
-  } else {
-    issue.path.forEach((node, i) => {
-      if (node.kind === 'scene') {
-        const div = document.createElement('div');
-        const cls = ['path-node', 'scene'];
-        if (i === 0) cls.push('start');
-        if (node.blockedEntry) cls.push('blocked');
-        div.className = cls.join(' ');
-        const isLast = i === issue.path.length - 1;
-        const badge = i === 0 ? '<span class="badge badge-ok">起点</span>'
-          : node.hypothetical ? '<span class="badge badge-warn">假设到达（选项实际无法触发）</span>'
-          : node.blockedEntry ? '<span class="badge badge-err">前置条件不成立</span>'
-          : isLast ? '<span class="badge badge-err">问题位置</span>' : '';
-        div.innerHTML = `
-          <span class="pn-title"></span><span class="pn-id"></span>
-          ${badge}
-        `;
-        div.querySelector('.pn-title').textContent = node.title || node.sceneId;
-        div.querySelector('.pn-id').textContent = node.sceneId;
-        div.insertAdjacentHTML('beforeend', stateChips(node.state, state.analysis.knownVars));
-        pathBox.appendChild(div);
-      } else {
-        const div = document.createElement('div');
-        div.className = 'path-edge' + (node.broken || node.entryBlocked || node.deadEnd ? ' broken' : '');
-        const targetTxt = node.target
-          ? ` → ${node.targetTitle ? node.targetTitle + ' (' + node.target + ')' : node.target}`
-          : '';
-        const prefix = node.broken ? '✕ ' : node.entryBlocked ? '⛔ ' : node.deadEnd ? '🔒 ' : '';
-        div.textContent = `${prefix}选项 ${node.optionIndex + 1}「${node.optionText || ''}」${targetTxt}${node.deadEnd ? '（条件不成立，无法选择）' : ''}`;
-        if (node.stateAfter) {
-          div.insertAdjacentHTML('beforeend', stateChips(node.stateAfter, state.analysis.knownVars));
-        }
-        pathBox.appendChild(div);
-      }
-    });
+    </div>`);
+    return;
   }
-
-  // 未满足条件
-  const wrap = $('detailUnmetWrap');
-  if (issue.unmet) {
-    wrap.hidden = false;
-    $('detailUnmet').innerHTML = '';
-    $('detailUnmet').appendChild(renderExprNode(issue.unmet));
-    const flips = collectFlips(issue.unmet);
-    const fix = $('detailFix');
-    if (issue.unmet.feasible === false) {
-      const cv = issue.unmet.conflicts || [];
-      fix.innerHTML = `⚠️ 该条件<b>逻辑上不可满足</b>：${cv.length ? `变量 ${cv.map((v) => `<code>${v}</code>`).join('、')} 被同时要求为真和为假；` : '不存在任何变量取值能使它成立；'}请修改条件表达式，而不是调整状态赋值。`;
-      fix.style.background = 'var(--danger-bg)';
-      fix.style.color = '#8a2b2b';
-    } else if (flips.length) {
-      fix.style.background = '';
-      fix.style.color = '';
-      fix.innerHTML = `最少只需让以下变量取反即可满足：${flips.map((v) => `<b><code>${v}</code></b>`).join('、')}。请检查路径上的状态赋值是否缺失或冲突。`;
-    } else if (issue.unmet.feasible === null) {
-      fix.style.background = '';
-      fix.style.color = '';
-      fix.innerHTML = '条件涉及变量较多，未做完整可满足性枚举；请人工核对子条件。';
+  path.forEach((node, i) => {
+    if (node.kind === 'scene') {
+      const div = document.createElement('div');
+      const cls = ['path-node', 'scene'];
+      if (i === 0) cls.push('start');
+      if (node.blockedEntry) cls.push('blocked');
+      div.className = cls.join(' ');
+      const isLast = i === path.length - 1;
+      const badge = i === 0 ? '<span class="badge badge-ok">起点</span>'
+        : node.hypothetical ? '<span class="badge badge-warn">假设到达（选项实际无法触发）</span>'
+        : node.blockedEntry ? '<span class="badge badge-err">前置条件不成立</span>'
+        : isLast ? '<span class="badge badge-err">问题位置</span>' : '';
+      div.innerHTML = `
+        <span class="pn-title"></span><span class="pn-id"></span>
+        ${badge}
+      `;
+      div.querySelector('.pn-title').textContent = node.title || node.sceneId;
+      div.querySelector('.pn-id').textContent = node.sceneId;
+      div.insertAdjacentHTML('beforeend', stateChips(node.state, state.analysis.knownVars));
+      pathBox.appendChild(div);
     } else {
-      fix.style.background = '';
-      fix.style.color = '';
-      fix.innerHTML = '条件在当前状态下成立（该问题来自结构性不可达，请检查跳转连接）。';
+      const div = document.createElement('div');
+      div.className = 'path-edge' + (node.broken || node.entryBlocked || node.deadEnd ? ' broken' : '');
+      const targetTxt = node.target
+        ? ` → ${node.targetTitle ? node.targetTitle + ' (' + node.target + ')' : node.target}`
+        : '';
+      const prefix = node.broken ? '✕ ' : node.entryBlocked ? '⛔ ' : node.deadEnd ? '🔒 ' : '';
+      div.textContent = `${prefix}选项 ${node.optionIndex + 1}「${node.optionText || ''}」${targetTxt}${node.deadEnd ? '（条件不成立，无法选择）' : ''}`;
+      if (node.stateAfter) {
+        div.insertAdjacentHTML('beforeend', stateChips(node.stateAfter, state.analysis.knownVars));
+      }
+      pathBox.appendChild(div);
     }
+  });
+}
+
+/** 渲染「未满足的条件」解释树与修复提示 */
+function renderUnmet(issue) {
+  const wrap = $('detailUnmetWrap');
+  if (!issue.unmet) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  $('detailUnmet').innerHTML = '';
+  $('detailUnmet').appendChild(renderExprNode(issue.unmet));
+  const flips = collectFlips(issue.unmet);
+  const fix = $('detailFix');
+  if (issue.unmet.feasible === false) {
+    const cv = issue.unmet.conflicts || [];
+    fix.innerHTML = `⚠️ 该条件<b>逻辑上不可满足</b>：${cv.length ? `变量 ${cv.map((v) => `<code>${v}</code>`).join('、')} 被同时要求为真和为假；` : '不存在任何变量取值能使它成立；'}请修改条件表达式，而不是调整状态赋值。`;
+    fix.style.background = 'var(--danger-bg)';
+    fix.style.color = '#8a2b2b';
+  } else if (flips.length) {
+    fix.style.background = '';
+    fix.style.color = '';
+    fix.innerHTML = `最少只需让以下变量取反即可满足：${flips.map((v) => `<b><code>${v}</code></b>`).join('、')}。请检查路径上的状态赋值是否缺失或冲突。`;
+  } else if (issue.unmet.feasible === null) {
+    fix.style.background = '';
+    fix.style.color = '';
+    fix.innerHTML = '条件涉及变量较多，未做完整可满足性枚举；请人工核对子条件。';
   } else {
-    wrap.hidden = true;
+    fix.style.background = '';
+    fix.style.color = '';
+    fix.innerHTML = '条件在当前状态下成立（该问题来自结构性不可达，请检查跳转连接）。';
   }
 }
 
@@ -678,6 +695,177 @@ function renderExprNode(node) {
 }
 
 /* ============================================================
+ * 分析基线：保存 / 对比 / 状态筛选 / 差异摘要
+ * ============================================================ */
+const DIFF_STATUS = {
+  new: { label: '新增', badge: 'badge-err' },
+  fixed: { label: '已修复', badge: 'badge-ok' },
+  changed: { label: '详情变化', badge: 'badge-warn' },
+  ongoing: { label: '仍存在', badge: 'badge-muted' },
+};
+
+async function saveBaseline() {
+  if (!state.story) return;
+  try {
+    const res = await api('POST', `/api/stories/${state.story.id}/baseline`, state.story);
+    state.baseline = res.baseline;
+    state.story.baseline = res.baseline; // 随剧情 JSON 持久化，后续保存剧情时携带
+    state.diff = null;
+    renderBaseline();
+    renderDiff();
+    toast('已保存分析基线');
+  } catch (e) {
+    toast(`保存基线失败：${e.message}`);
+  }
+}
+
+async function compareBaseline() {
+  if (!state.story) return;
+  if (!state.baseline) return toast('尚未保存基线，请先点击「保存基线」');
+  try {
+    state.diff = await api('POST', `/api/stories/${state.story.id}/compare`, state.story);
+    state.diffFilter = 'all';
+    renderDiff();
+  } catch (e) {
+    toast(`对比失败：${e.message}`);
+  }
+}
+
+async function clearBaseline() {
+  if (!state.story || !state.baseline) return;
+  if (!confirm('确定清除当前剧情的分析基线？')) return;
+  try {
+    await api('DELETE', `/api/stories/${state.story.id}/baseline`);
+    state.baseline = null;
+    state.story.baseline = null;
+    state.diff = null;
+    renderBaseline();
+    renderDiff();
+    toast('已清除基线');
+  } catch (e) {
+    toast(`清除基线失败：${e.message}`);
+  }
+}
+
+function renderBaseline() {
+  const info = $('baselineInfo');
+  const has = !!(state.story && state.baseline);
+  $('btnSaveBaseline').disabled = !state.story;
+  $('btnCompareBaseline').disabled = !has;
+  $('btnClearBaseline').hidden = !has;
+  if (!state.story) { info.textContent = ''; return; }
+  if (!has) {
+    info.textContent = '尚未保存基线：点击「保存基线」记录当前分析结果，供后续编辑后对比。';
+    return;
+  }
+  const when = new Date(state.baseline.savedAt).toLocaleString();
+  const n = (state.baseline.issues || []).length;
+  info.textContent = `基线保存于 ${when}，含 ${n} 条问题；编辑剧情后点击「对比基线」查看差异。`;
+}
+
+function renderDiff() {
+  const panel = $('diffPanel');
+  if (!state.diff) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const s = state.diff.summary;
+
+  // 差异摘要
+  const base = state.diff.baseline || {};
+  const when = base.savedAt ? new Date(base.savedAt).toLocaleString() : '未知时间';
+  $('diffSummary').textContent = (s.new + s.fixed + s.changed === 0)
+    ? `与 ${when} 的基线完全一致：没有新增、修复或详情变化（仍存在 ${s.ongoing} 条）。`
+    : `对比 ${when} 的基线：新增 ${s.new} · 已修复 ${s.fixed} · 详情变化 ${s.changed} · 仍存在 ${s.ongoing}`;
+
+  // 状态筛选
+  const filters = [
+    ['all', `全部 ${s.new + s.fixed + s.changed + s.ongoing}`],
+    ['new', `新增 ${s.new}`],
+    ['fixed', `已修复 ${s.fixed}`],
+    ['changed', `详情变化 ${s.changed}`],
+    ['ongoing', `仍存在 ${s.ongoing}`],
+  ];
+  const fbox = $('diffFilters');
+  fbox.innerHTML = '';
+  for (const [key, label] of filters) {
+    const b = document.createElement('button');
+    b.className = 'chip' + (state.diffFilter === key ? ' active' : '');
+    b.textContent = label;
+    b.addEventListener('click', () => { state.diffFilter = key; renderDiff(); });
+    fbox.appendChild(b);
+  }
+
+  // 差异条目
+  const ul = $('diffList');
+  ul.innerHTML = '';
+  const entries = state.diff.entries.filter((e) => state.diffFilter === 'all' || e.status === state.diffFilter);
+  if (!entries.length) {
+    ul.innerHTML = '<li class="all-clear">✓ 该状态下没有条目</li>';
+    return;
+  }
+  for (const entry of entries) {
+    const meta = ISSUE_META[entry.type] || { label: entry.type };
+    const st = DIFF_STATUS[entry.status];
+    const li = document.createElement('li');
+    li.className = `issue-item diff-item st-${entry.status}`;
+    li.innerHTML = `
+      <div class="ii-head"><span class="badge ${st.badge}">${st.label}</span><span class="ii-type">${meta.label}</span></div>
+      <div class="ii-msg"></div>
+      <div class="ii-meta"></div>
+    `;
+    li.querySelector('.ii-msg').textContent = entry.message;
+    const loc = [
+      entry.sceneId && `场景:${entry.sceneId}`,
+      entry.optionIndex !== undefined && entry.optionIndex !== null && `选项#${entry.optionIndex + 1}`,
+      entry.targetSceneId && `目标:${entry.targetSceneId}`,
+    ].filter(Boolean).join(' · ');
+    li.querySelector('.ii-meta').textContent = loc;
+    li.addEventListener('click', () => {
+      document.querySelectorAll('.issue-item.active-issue').forEach((x) => x.classList.remove('active-issue'));
+      li.classList.add('active-issue');
+      renderDiffDetail(entry);
+    });
+    ul.appendChild(li);
+  }
+}
+
+/** 对比条目的详情：新增/已修复/仍存在复用单问题渲染；详情变化展示前后路径对照 */
+function renderDiffDetail(entry) {
+  const typeMeta = ISSUE_META[entry.type] || { label: entry.type };
+  const stLabel = DIFF_STATUS[entry.status].label;
+
+  if (entry.status === 'changed') {
+    const before = entry.baselineIssue;
+    const after = entry.currentIssue;
+    $('detailPanel').hidden = false;
+    $('detailTitle').textContent = `${stLabel} · ${typeMeta.label}`;
+    $('detailMessage').textContent = before.message === after.message
+      ? after.message
+      : `文案变化 — 基线：「${before.message}」；现在：「${after.message}」`;
+    const pathBox = $('detailPath');
+    pathBox.innerHTML = '';
+    appendPathSection(pathBox, '基线时的路径', before.path);
+    appendPathSection(pathBox, '当前路径', after.path);
+    renderUnmet(after);
+    return;
+  }
+
+  const issue = entry.currentIssue || entry.baselineIssue;
+  renderDetail(issue);
+  $('detailTitle').textContent = `${stLabel} · ${typeMeta.label}`;
+  if (entry.status === 'fixed') {
+    $('detailMessage').textContent = `该问题在当前分析中已不存在。基线时的报告：${issue.message}`;
+  }
+}
+
+function appendPathSection(container, label, path) {
+  const h = document.createElement('div');
+  h.className = 'path-subhead';
+  h.textContent = label;
+  container.appendChild(h);
+  appendPathNodes(container, path);
+}
+
+/* ============================================================
  * 全局事件 & 启动
  * ============================================================ */
 function bindGlobalEvents() {
@@ -702,6 +890,10 @@ function bindGlobalEvents() {
   });
   $('btnAnalyze').addEventListener('click', () => runAnalysis(state.dirty));
   $('btnCloseDetail').addEventListener('click', () => $('detailPanel').hidden = true);
+  $('btnSaveBaseline').addEventListener('click', saveBaseline);
+  $('btnCompareBaseline').addEventListener('click', compareBaseline);
+  $('btnClearBaseline').addEventListener('click', clearBaseline);
+  $('btnCloseDiff').addEventListener('click', () => { state.diff = null; renderDiff(); });
 
   // Ctrl/Cmd + S 保存
   document.addEventListener('keydown', (e) => {
