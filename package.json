@@ -4,7 +4,8 @@
   "description": "分支剧情一致性审校 Web 应用：状态传播分析、不可达场景与死选项检测",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node test/smoke.js && node test/baseline.js"
   },
   "engines": {
     "node": ">=18"

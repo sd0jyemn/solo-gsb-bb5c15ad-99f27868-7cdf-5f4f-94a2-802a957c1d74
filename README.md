@@ -104,6 +104,8 @@ npm start
 
 - 场景 `assigns`：**进入场景时** 执行的赋值（包括从起点进入）；
 - 选项 `assigns`：选择该选项时执行的赋值，随后再执行目标场景的进入赋值；
+- 选项 `uid`：可选的稳定身份标识，基线对比用它识别“同一条选项”（不随选项拖动重排而变）；留空时保存会自动生成；
+- 顶层 `baseline`：分析基线快照（由「保存分析基线」生成，也可随导入 JSON 携带，无效快照会被忽略）；
 - 起点场景的初始变量状态 = 全部为 `false` 再叠加起点场景自身的进入赋值。
 
 导入通过页面右上角 **「⬆ 导入 JSON」** 完成（导入总是创建一份新剧情，不会覆盖现有内容）；导出使用 **「⬇ 导出 JSON」** 或接口 `GET /api/stories/:id/export`。
@@ -120,6 +122,29 @@ npm start
 
 “条件永不成立”的判定：若某选项 **被到达过**，但在所有到达它的具体状态下条件都不成立，则该选项对玩家不可见；只要存在任意一个可达状态使条件成立，即视为正常。
 
+## 分析基线（对比修订前后）
+
+在右栏「一致性分析」中可以把**当前分析结果保存为基线**，随后继续编辑剧情并随时「运行对比」：
+
+| 对比状态 | 含义 |
+| --- | --- |
+| **新增** `new` | 基线时不存在、当前分析中出现的问题 |
+| **已修复** `fixed` | 基线时存在、当前分析中已消失的问题 |
+| **仍存在** `persistent` | 同一条问题仍在，路径与文案也没有变化 |
+| **详情变化** `changed` | 同一条问题仍在，但**最短可达路径或问题文案发生了变化**；详情面板中可用「当前路径 / 基线路径」标签对照前后路径，文案变化则同时展示基线与当前两版消息 |
+
+对比结果上方有差异摘要（各类计数）与按状态筛选的按钮；对比之后若继续编辑，会提示「对比结果可能过期」，重新运行对比即可。
+
+**稳定指纹（为什么重排场景 / 选项不会错配）**：后端为每条问题生成一个不依赖任何数组顺序的指纹，身份要素为：
+
+- 问题类型（不可达场景 / 悬空跳转 / 入口冲突 / 恒假选项 / 结构错误）；
+- 场景 ID、**选项稳定 UID**（随剧情持久化，保存旧剧情时自动回填；导入的旧数据缺失时用 `场景ID#数组下标` 兜底）；
+- 关键目标场景 ID（如悬空跳转指向的目标）。
+
+指纹只对这些身份要素做规范化 JSON 序列化（对象键排序）后取 SHA-1，路径、文案、变量状态等易变内容不参与指纹，因此移动场景顺序、调整选项排列、修改正文都不会让同一条问题被误判为“新增”。
+
+基线快照（保存时间、问题指纹、前后对比所需的路径与消息）以 `baseline` 字段**随剧情 JSON 一起持久化**，导出 / 导入 JSON 时一并携带；删除剧情即删除基线，也可单独「删除基线」。保存基线会同时把当前草稿落盘，保证基线与保存内容一致。
+
 ## HTTP API
 
 | 方法 | 路径 | 说明 |
@@ -131,25 +156,40 @@ npm start
 | `DELETE` | `/api/stories/:id` | 删除剧情 |
 | `POST` | `/api/analyze` | 对请求体中的剧情直接分析（编辑时实时检查，不落盘） |
 | `GET` | `/api/stories/:id/analysis` | 分析已保存的剧情 |
-| `GET` | `/api/stories/:id/export` | 下载剧情 JSON |
+| `POST` | `/api/stories/:id/baseline` | 把请求体中的剧情分析结果保存为基线（同时落盘剧情），返回 `{ story, baseline, analysis }` |
+| `POST` | `/api/stories/:id/baseline/compare` | 基线对比；请求体可省略（对比已保存剧情）或传入编辑中的草稿，返回 `{ summary, items }` |
+| `DELETE` | `/api/stories/:id/baseline` | 删除基线（剧情内容不变） |
+| `GET` | `/api/stories/:id/export` | 下载剧情 JSON（含基线） |
+
+对比结果 `summary` 形如 `{ total, new, fixed, persistent, changed }`；`items` 中每条为 `{ status, issue, before, changes }`（`issue` 为当前问题、`before` 为基线快照；`changes` 为 `['path']` / `['message']`）。每条问题都带 `fingerprint` 字段（16 位 SHA-1）。
 
 ## 目录结构
 
 ```
 .
-├── server.js              # Express 入口与 REST API
+├── server.js              # Express 入口与 REST API（含基线接口）
 ├── src/
 │   ├── expression.js      # 布尔表达式递归下降解析器 / 求值 / 失败解释
-│   ├── analyzer.js        # 「场景+状态」BFS 传播去重分析引擎
-│   └── storage.js         # JSON 文件存储与首启播种
+│   ├── analyzer.js        # 「场景+状态」BFS 传播去重分析引擎（附带问题指纹）
+│   ├── fingerprint.js     # 不依赖数组顺序的问题稳定指纹
+│   ├── baseline.js        # 基线快照构建与新增/已修复/仍存在/详情变化对比
+│   └── storage.js         # JSON 文件存储、首启播种、选项 UID 与基线持久化
 ├── public/                # 原生 HTML / CSS / JavaScript 前端（无构建步骤）
 │   ├── index.html
 │   ├── styles.css
 │   └── app.js
 ├── samples/               # 随启动初始化的示例剧情
-├── test/smoke.js          # 分析引擎自检（node test/smoke.js）
+├── test/
+│   ├── smoke.js           # 分析引擎自检（node test/smoke.js）
+│   └── baseline.js        # 指纹 / 基线对比 / 持久化自检（node test/baseline.js）
 ├── Dockerfile
 └── docker-compose.yml
+```
+
+自检：
+
+```bash
+npm test          # 依次运行 smoke.js 与 baseline.js
 ```
 
 ## 技术栈

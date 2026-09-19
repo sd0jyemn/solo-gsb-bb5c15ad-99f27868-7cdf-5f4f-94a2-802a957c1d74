@@ -19,9 +19,15 @@
  */
 
 const { compile } = require('./expression');
+const { issueFingerprint } = require('./fingerprint');
 
 const MAX_STATES = 1 << 20; // 安全上限：约 100 万个具体状态
 const INF = 1e9;            // “不存在任何路径”的距离哨兵（保证 JSON 可序列化）
+
+/** 选项稳定身份：优先 uid（随剧情持久化、与数组顺序无关），旧数据退回数组下标 */
+function optionUid(od) {
+  return (od.option && od.option.uid) || `idx:${od.sceneId}#${od.index}`;
+}
 
 function encodeState(state, varNames) {
   let s = '';
@@ -63,22 +69,35 @@ function compileAll(story, knownVars) {
   const errors = [];
   const sceneMap = new Map((story.scenes || []).map((s) => [s.id, s]));
 
-  const cond = (raw, where) => {
+  // loc 为结构化位置信息（供指纹去重使用）：
+  //   { kind:'scenePrecondition', sceneId } 或 { kind:'option', sceneId, optionIndex }
+  const locText = (loc) => (loc.kind === 'option'
+    ? `场景 "${loc.sceneId}" 选项 ${loc.optionIndex + 1} 的条件`
+    : `场景 "${loc.sceneId}" 的前置条件`);
+
+  const cond = (raw, loc) => {
     try {
       return compile(raw);
     } catch (e) {
-      errors.push({ type: 'error', severity: 'error', code: 'badSyntax', where, message: e.message });
+      errors.push({
+        type: 'error', severity: 'error', code: 'badSyntax',
+        where: locText(loc), message: e.message, ...loc,
+      });
       return null;
     }
   };
 
-  const checkVars = (compiled, where) => {
+  const checkVars = (compiled, loc) => {
     if (!compiled) return;
     for (const v of compiled.vars()) {
       if (!knownVars.includes(v)) {
         errors.push({
-          type: 'error', severity: 'warning', code: 'unknownVar', where,
+          type: 'error', severity: 'warning', code: 'unknownVar',
+          where: loc.kind === 'option'
+            ? `场景 "${loc.sceneId}" 选项 ${loc.optionIndex + 1}`
+            : `场景 "${loc.sceneId}" 的前置条件`,
           message: `引用了未声明且从未赋值的变量 "${v}"，它将永远为 false`,
+          variable: v, ...loc,
         });
       }
     }
@@ -89,13 +108,15 @@ function compileAll(story, knownVars) {
   const optData = []; // {sceneId, index, option, cond, assigns}
 
   for (const scene of story.scenes || []) {
-    const pc = cond(scene.precondition, `场景 "${scene.id}" 的前置条件`);
+    const preLoc = { kind: 'scenePrecondition', sceneId: scene.id };
+    const pc = cond(scene.precondition, preLoc);
     sceneCond.set(scene.id, pc);
-    checkVars(pc, `场景 "${scene.id}" 的前置条件`);
+    checkVars(pc, preLoc);
     sceneAssigns.set(scene.id, (scene.assigns || []).filter((a) => a && a.variable));
     (scene.options || []).forEach((opt, idx) => {
-      const c = cond(opt.condition, `场景 "${scene.id}" 选项 ${idx + 1} 的条件`);
-      checkVars(c, `场景 "${scene.id}" 选项 ${idx + 1}`);
+      const optLoc = { kind: 'option', sceneId: scene.id, optionIndex: idx, optionUid: opt.uid || null };
+      const c = cond(opt.condition, optLoc);
+      checkVars(c, optLoc);
       const assigns = (opt.assigns || []).filter((a) => a && a.variable);
       optData.push({ sceneId: scene.id, index: idx, option: opt, cond: c, assigns });
     });
@@ -119,15 +140,28 @@ function analyze(storyInput) {
   }
   const dupIds = sceneIds.filter((id, i) => sceneIds.indexOf(id) !== i);
   if (dupIds.length) {
-    errors.push({ type: 'error', severity: 'error', code: 'dupScene', message: `存在重复的场景 ID：${[...new Set(dupIds)].join('、')}` });
+    errors.push({
+      type: 'error', severity: 'error', code: 'dupScene',
+      sceneIds: [...new Set(dupIds)],
+      message: `存在重复的场景 ID：${[...new Set(dupIds)].join('、')}`,
+    });
   }
   const sceneMap = new Map();
   for (const s of scenes) {
-    if (!s.id) errors.push({ type: 'error', severity: 'error', code: 'noSceneId', message: `存在没有 ID 的场景（标题：${s.title || '无标题'}）` });
-    else if (!sceneMap.has(s.id)) sceneMap.set(s.id, s);
+    if (!s.id) {
+      errors.push({
+        type: 'error', severity: 'error', code: 'noSceneId',
+        sceneIndex: scenes.indexOf(s), title: s.title || '',
+        message: `存在没有 ID 的场景（标题：${s.title || '无标题'}）`,
+      });
+    } else if (!sceneMap.has(s.id)) sceneMap.set(s.id, s);
   }
   if (story.startScene && !sceneMap.has(story.startScene)) {
-    errors.push({ type: 'error', severity: 'error', code: 'missingStart', message: `起点场景 "${story.startScene}" 不存在` });
+    errors.push({
+      type: 'error', severity: 'error', code: 'missingStart',
+      startScene: story.startScene,
+      message: `起点场景 "${story.startScene}" 不存在`,
+    });
   }
 
   const knownVars = collectStateVars({ ...story, scenes });
@@ -396,6 +430,8 @@ function analyze(storyInput) {
         severity: 'error',
         sceneId: od.sceneId,
         optionIndex: od.index,
+        optionUid: optionUid(od),
+        targetSceneId: targetId || '',
         message: targetId
           ? `选项 "${optionLabel}" 指向不存在的场景 "${targetId}"（悬空跳转）`
           : `选项 "${optionLabel}" 没有设置目标场景`,
@@ -431,6 +467,7 @@ function analyze(storyInput) {
         sceneId: od.sceneId,
         targetSceneId: targetId,
         optionIndex: od.index,
+        optionUid: optionUid(od),
         message: `选项 "${optionLabel}" 可以到达，但进入 "${targetId}" 时其前置条件恒不成立（状态赋值冲突）`,
         path: blockedPath,
         unmet: tc ? tc.explain(b.nextState, true) : null,
@@ -449,6 +486,7 @@ function analyze(storyInput) {
         sceneId: od.sceneId,
         targetSceneId: targetId,
         optionIndex: od.index,
+        optionUid: optionUid(od),
         message: `选项 "${optionLabel}" 的条件在所有可达状态下都不成立（条件永不成立）`,
         path: f
           ? buildPath(f.predKey, { optionIndex: od.index, optionText: option.label || optionLabel, target: targetId })
@@ -461,16 +499,24 @@ function analyze(storyInput) {
   }
 
   // 结构性 / 语法错误置于最前（它们可能导致其他分析结果失真）
+  const ERROR_KEEP = [
+    'code', 'where', 'sceneId', 'optionIndex', 'optionUid', 'variable',
+    'sceneIds', 'sceneIndex', 'title', 'startScene',
+  ];
   for (const e of errors) {
-    issues.push({
+    const issue = {
       type: 'error',
       severity: e.severity || 'error',
-      code: e.code,
       message: e.where ? `${e.where}：${e.message}` : e.message,
       path: [],
       distance: -1,
-    });
+    };
+    for (const k of ERROR_KEEP) if (e[k] !== undefined) issue[k] = e[k];
+    issues.push(issue);
   }
+
+  // 为每条问题附加不依赖数组顺序的稳定指纹（基线对比使用）
+  for (const issue of issues) issue.fingerprint = issueFingerprint(issue);
 
   // 结构性错误排前面，其余按路径长度（最接近可达的优先）
   const rank = { error: 0, unreachableScene: 1, blockedEntry: 2, orphanOption: 3, neverTrueOption: 4 };

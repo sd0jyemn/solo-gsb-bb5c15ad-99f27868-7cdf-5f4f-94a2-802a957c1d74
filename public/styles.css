@@ -206,6 +206,76 @@ code {
 /* ---------- 右栏分析 ---------- */
 .analysis-card { max-height: 55%; display: flex; flex-direction: column; }
 .analysis-card > .issue-list { overflow: auto; }
+
+/* 分析基线工具栏 */
+.baseline-bar {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--info-bg); border: 1px solid #d3e0ff;
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; flex-wrap: wrap;
+}
+.baseline-bar .btn { flex-shrink: 0; }
+.baseline-info { font-size: 12px; color: var(--text); }
+.baseline-info .muted { color: var(--muted); }
+
+/* 基线对比摘要 + 筛选 */
+.diff-bar {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 8px; background: #fafbfe;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.diff-summary { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.diff-title { font-weight: 700; color: var(--muted); }
+.diff-chip {
+  font-size: 11px; font-weight: 700; border-radius: 10px; padding: 2px 9px;
+}
+.diff-chip-new { background: var(--info-bg); color: var(--primary); border: 1px solid #b9cdfa; }
+.diff-chip-fixed { background: var(--ok-bg); color: var(--ok); border: 1px solid #a9dfc1; }
+.diff-chip-changed { background: var(--warning-bg); color: var(--warning); border: 1px solid #ecd2a0; }
+.diff-chip-persistent { background: var(--danger-bg); color: var(--danger); border: 1px solid #f0c3c3; }
+
+.diff-actions { display: flex; gap: 6px; }
+.diff-filters { display: flex; gap: 5px; flex-wrap: wrap; }
+.diff-filter {
+  border: 1px solid var(--border); background: #fff; border-radius: 12px;
+  font-size: 11px; padding: 2px 10px; cursor: pointer; color: var(--muted);
+}
+.diff-filter:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+.diff-filter.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.diff-filter:disabled { opacity: .45; cursor: default; }
+.diff-stale { font-size: 11px; color: var(--warning); background: var(--warning-bg); border-radius: 6px; padding: 4px 8px; }
+
+/* 问题条目上的对比状态 */
+.issue-item .ii-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.issue-item.is-new { border-left: 3px solid var(--primary); background: #f7faff; }
+.issue-item.is-fixed { border-left: 3px solid var(--ok); opacity: .72; background: #f7fdf9; }
+.issue-item.is-changed { border-left: 3px solid var(--warning); background: #fffdf7; }
+.issue-item.is-persistent { border-left: 3px solid var(--danger); }
+.diff-badge {
+  font-size: 10px; font-weight: 700; border-radius: 10px; padding: 2px 8px;
+  white-space: nowrap; flex-shrink: 0;
+}
+.diff-badge.diff-new { background: var(--info-bg); color: var(--primary); }
+.diff-badge.diff-fixed { background: var(--ok-bg); color: var(--ok); }
+.diff-badge.diff-changed { background: var(--warning-bg); color: var(--warning); }
+.diff-badge.diff-persistent { background: var(--danger-bg); color: var(--danger); }
+.detail-diff-badge { font-size: 11px; margin-bottom: 8px; display: inline-block; }
+
+/* 详情面板：前后文案对比 / 路径切换 */
+.msg-diff { display: flex; flex-direction: column; gap: 5px; }
+.msg-diff-row { display: flex; gap: 8px; font-size: 12.5px; line-height: 1.5; border-radius: 6px; padding: 5px 8px; }
+.msg-diff-row.before { background: #f3f4f7; color: var(--muted); }
+.msg-diff-row.after { background: var(--info-bg); }
+.msg-diff-tag { font-size: 10px; font-weight: 800; border-radius: 4px; padding: 1px 6px; height: fit-content; background: rgba(0,0,0,.08); }
+.msg-diff-row.after .msg-diff-tag { background: var(--primary); color: #fff; }
+.path-tabs { display: flex; gap: 5px; margin-bottom: 7px; }
+.path-tab {
+  border: 1px solid var(--border); background: #fff; border-radius: 6px;
+  font-size: 11px; padding: 3px 10px; cursor: pointer; color: var(--muted);
+}
+.path-tab:hover:not(:disabled) { border-color: var(--primary); }
+.path-tab.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.path-tab:disabled { opacity: .5; cursor: default; }
+
 .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
 .stat {
   background: #f7f9fc; border-radius: 8px; padding: 7px 9px;

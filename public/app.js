@@ -8,6 +8,12 @@ const state = {
   story: null,          // 当前剧情（编辑中的草稿）
   currentId: null,      // 当前选中场景 ID
   analysis: null,       // 最近一次分析结果
+  baseline: null,       // 当前剧情保存的分析基线
+  diff: null,           // 最近一次基线对比结果 { summary, items }
+  diffFilter: 'all',    // 对比状态筛选：all/new/fixed/persistent/changed
+  diffStale: false,     // 对比之后剧情又被编辑过
+  detailItem: null,     // 详情面板当前展示的对比条目
+  detailPathMode: 'after', // 详情中查看的路径：after（当前）/ before（基线）
   dirty: false,
   saving: false,
 };
@@ -56,6 +62,11 @@ async function openStory(id) {
   state.story = await api('GET', `/api/stories/${id}`);
   state.currentId = state.story.startScene || (state.story.scenes[0] && state.story.scenes[0].id) || null;
   state.dirty = false;
+  state.baseline = state.story.baseline || null;
+  state.diff = null;
+  state.diffFilter = 'all';
+  state.diffStale = false;
+  state.detailItem = null;
   $('storySelect').value = id;
   renderAll();
   await runAnalysis(false);
@@ -89,6 +100,7 @@ async function saveStory() {
   try {
     const saved = await api('PUT', `/api/stories/${state.story.id}`, state.story);
     state.story = saved;
+    state.baseline = saved.baseline || null;
     state.dirty = false;
     renderMeta();
     renderSceneList();
@@ -108,6 +120,10 @@ async function deleteStory() {
   await api('DELETE', `/api/stories/${state.story.id}`);
   state.story = null;
   state.analysis = null;
+  state.baseline = null;
+  state.diff = null;
+  state.detailItem = null;
+  state.diffStale = false;
   const next = await loadList();
   if (next) await openStory(next);
   else { renderAll(); toast('已删除'); }
@@ -449,8 +465,10 @@ function bindEditorEvents() {
 let reanalyzeTimer = null;
 function markDirty(rerender) {
   state.dirty = true;
+  if (state.diff) state.diffStale = true;
   renderSaveStatus();
   if (rerender) rerender();
+  else renderAnalysis();
   clearTimeout(reanalyzeTimer);
   reanalyzeTimer = setTimeout(() => runAnalysis(true), 500);
 }
@@ -478,6 +496,76 @@ async function runAnalysis(isDraft) {
   }
 }
 
+/* ============================================================
+ * 分析基线：保存 / 对比 / 删除
+ * ============================================================ */
+async function saveBaseline() {
+  if (!state.story) return;
+  try {
+    const result = await api('POST', `/api/stories/${state.story.id}/baseline`, state.story);
+    state.story = result.story;
+    state.baseline = result.baseline;
+    state.analysis = result.analysis;
+    state.dirty = false;
+    state.diffStale = false;
+    renderMeta();
+    renderSceneList();
+    renderEditor();
+    renderSaveStatus();
+    toast('已保存分析基线，可开始编辑后运行对比');
+    await runCompare();
+  } catch (e) {
+    toast(`保存基线失败：${e.message}`);
+  }
+}
+
+async function runCompare() {
+  if (!state.story || !state.baseline) return;
+  try {
+    state.diff = await api('POST', `/api/stories/${state.story.id}/baseline/compare`, state.story);
+    state.diffStale = false;
+    state.detailItem = null;
+    renderDetail(null);
+    renderAnalysis();
+  } catch (e) {
+    toast(`对比失败：${e.message}`);
+  }
+}
+
+async function clearBaseline() {
+  if (!state.story || !state.baseline) return;
+  if (!confirm('确定删除该剧情的分析基线？删除后将无法再做基线对比。')) return;
+  try {
+    const result = await api('DELETE', `/api/stories/${state.story.id}/baseline`);
+    state.story = result.story;
+    state.baseline = null;
+    state.diff = null;
+    state.diffFilter = 'all';
+    state.diffStale = false;
+    state.detailItem = null;
+    renderDetail(null);
+    renderAnalysis();
+    toast('基线已删除');
+  } catch (e) {
+    toast(`删除基线失败：${e.message}`);
+  }
+}
+
+const DIFF_META = {
+  new: { label: '新增', cls: 'diff-new' },
+  fixed: { label: '已修复', cls: 'diff-fixed' },
+  persistent: { label: '仍存在', cls: 'diff-persistent' },
+  changed: { label: '详情变化', cls: 'diff-changed' },
+};
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 const ISSUE_META = {
   unreachableScene: { label: '不可达场景', sev: 'error' },
   orphanOption: { label: '悬空跳转', sev: 'error' },
@@ -487,6 +575,9 @@ const ISSUE_META = {
 };
 
 function renderAnalysis() {
+  renderBaselineBar();
+  renderDiffBar();
+
   const stats = $('analysisStats');
   const ul = $('issueList');
   ul.innerHTML = '';
@@ -505,11 +596,23 @@ function renderAnalysis() {
     <div class="stat ${bad ? 'stat-bad' : 'stat-ok'}"><span>问题数</span><b>${c.issues + c.errors}</b></div>
   `;
 
+  // 对比模式：按状态筛选展示（截断提示在对比模式下省略，避免混淆）
+  if (state.diff) {
+    const items = state.diff.items.filter((it) => state.diffFilter === 'all' || it.status === state.diffFilter);
+    if (!items.length) {
+      ul.innerHTML = '<li class="all-clear">当前筛选下没有问题</li>';
+      return;
+    }
+    for (const item of items) ul.appendChild(renderIssueItem(item));
+    return;
+  }
+
   const all = [...state.analysis.issues];
   if (!all.length && !state.analysis.truncated) {
     ul.innerHTML = '<li class="all-clear">✓ 未发现一致性问题：所有场景可达、所有选项均可能触发</li>';
     return;
   }
+
   if (state.analysis.truncated) {
     const li = document.createElement('li');
     li.className = 'issue-item severity-error';
@@ -517,26 +620,119 @@ function renderAnalysis() {
     ul.appendChild(li);
   }
 
-  all.forEach((issue, idx) => {
-    const meta = ISSUE_META[issue.type] || { label: issue.type, sev: issue.severity || 'warning' };
-    const li = document.createElement('li');
-    li.className = `issue-item severity-${meta.sev}`;
-    li.innerHTML = `
-      <div class="ii-type">${meta.label}</div>
-      <div class="ii-msg"></div>
-      <div class="ii-meta"></div>
-    `;
-    li.querySelector('.ii-msg').textContent = issue.message;
-    const loc = [issue.sceneId && `场景:${issue.sceneId}`, issue.optionIndex !== undefined && `选项#${issue.optionIndex + 1}`,
-      issue.targetSceneId && `目标:${issue.targetSceneId}`].filter(Boolean).join(' · ');
-    li.querySelector('.ii-meta').textContent = loc;
-    li.addEventListener('click', () => {
-      document.querySelectorAll('.issue-item.active-issue').forEach((x) => x.classList.remove('active-issue'));
-      li.classList.add('active-issue');
-      renderDetail(issue);
+  all.forEach((issue) => ul.appendChild(renderIssueItem({ status: null, issue })));
+}
+
+function renderBaselineBar() {
+  const bar = $('baselineBar');
+  const info = $('baselineInfo');
+  if (!state.story) { bar.hidden = true; return; }
+  bar.hidden = false;
+  $('btnSaveBaseline').disabled = !!state.saving;
+  if (state.baseline) {
+    const n = state.baseline.issues.length;
+    info.innerHTML = `基线：<b>${fmtTime(state.baseline.savedAt)}</b> · ${n} 条问题`;
+    info.title = '基线是之后对比“新增 / 已修复 / 仍存在”的参照快照';
+  } else {
+    info.innerHTML = '<span class="muted">尚未保存基线</span>';
+    info.title = '';
+  }
+}
+
+function renderDiffBar() {
+  const bar = $('diffBar');
+  if (!state.story || !state.baseline) { bar.hidden = true; return; }
+  bar.hidden = false;
+  $('diffStale').hidden = !state.diffStale;
+
+  const sum = $('diffSummary');
+  if (state.diff) {
+    const s = state.diff.summary;
+    const chip = (key, n) => n
+      ? `<span class="diff-chip diff-chip-${key}">${DIFF_META[key].label} ${n}</span>`
+      : '';
+    sum.innerHTML = `<span class="diff-title">对比摘要</span>` +
+      chip('new', s.new) + chip('fixed', s.fixed) +
+      chip('changed', s.changed) + chip('persistent', s.persistent);
+  } else {
+    sum.innerHTML = '<span class="muted">保存基线后编辑剧情，再点击「运行对比」查看变化</span>';
+  }
+
+  const filters = $('diffFilters');
+  filters.innerHTML = '';
+  const tabs = [
+    ['all', '全部'],
+    ['new', '新增'],
+    ['fixed', '已修复'],
+    ['changed', '详情变化'],
+    ['persistent', '仍存在'],
+  ];
+  for (const [key, label] of tabs) {
+    const btn = document.createElement('button');
+    btn.className = 'diff-filter' + (state.diffFilter === key ? ' active' : '');
+    if (key !== 'all' && state.diff) {
+      btn.textContent = `${label} ${state.diff.summary[key]}`;
+      if (state.diff.summary[key] === 0) btn.disabled = true;
+    } else {
+      btn.textContent = label;
+    }
+    btn.addEventListener('click', () => {
+      state.diffFilter = key;
+      renderDiffBar();
+      const ul = $('issueList');
+      ul.innerHTML = '';
+      if (!state.diff) return;
+      const items = state.diff.items.filter((it) => key === 'all' || it.status === key);
+      if (!items.length) ul.innerHTML = '<li class="all-clear">当前筛选下没有问题</li>';
+      for (const item of items) ul.appendChild(renderIssueItem(item));
     });
-    ul.appendChild(li);
+    filters.appendChild(btn);
+  }
+}
+
+/** 渲染一条问题（对比模式 item 含 status/before；普通模式 status=null） */
+function renderIssueItem(item) {
+  const issue = item.issue || item.before;
+  const meta = ISSUE_META[issue.type] || { label: issue.type, sev: issue.severity || 'warning' };
+  const li = document.createElement('li');
+  const cls = ['issue-item', `severity-${meta.sev}`];
+  if (item.status) cls.push(`is-${item.status}`);
+  li.className = cls.join(' ');
+
+  let statusBadge = '';
+  if (item.status) {
+    const dm = DIFF_META[item.status];
+    const changeTxt = item.status === 'changed'
+      ? `（${item.changes.map((x) => (x === 'path' ? '路径变化' : '文案变化')).join('、')}）`
+      : '';
+    statusBadge = `<span class="diff-badge ${dm.cls}">${dm.label}${changeTxt}</span>`;
+  }
+
+  li.innerHTML = `
+    <div class="ii-head">
+      <div class="ii-type">${meta.label}</div>
+      ${statusBadge}
+    </div>
+    <div class="ii-msg"></div>
+    <div class="ii-meta"></div>
+  `;
+  li.querySelector('.ii-msg').textContent = issue.message;
+  const loc = [issue.sceneId && `场景:${issue.sceneId}`, issue.optionIndex !== undefined && issue.optionIndex !== null && `选项#${issue.optionIndex + 1}`,
+    issue.targetSceneId && `目标:${issue.targetSceneId}`].filter(Boolean).join(' · ');
+  li.querySelector('.ii-meta').textContent = loc;
+  li.addEventListener('click', () => {
+    document.querySelectorAll('.issue-item.active-issue').forEach((x) => x.classList.remove('active-issue'));
+    li.classList.add('active-issue');
+    openDetail(item);
   });
+  return li;
+}
+
+function openDetail(item) {
+  state.detailItem = item;
+  // 已修复的问题当前已不存在，默认展示基线（before）路径
+  state.detailPathMode = item.status === 'fixed' ? 'before' : 'after';
+  renderDetail(item);
 }
 
 /* ============================================================
@@ -550,30 +746,89 @@ function stateChips(stateObj, knownVars) {
   }).join('') + `</div>`;
 }
 
-function renderDetail(issue) {
+function renderDetail(item) {
   const panel = $('detailPanel');
-  if (!issue) { panel.hidden = true; return; }
+  if (!item) { panel.hidden = true; return; }
   panel.hidden = false;
+
+  const status = item.status || null;
+  const after = item.issue || null;
+  const before = item.before || null;
+
+  // 状态徽标
+  const statusBox = $('detailStatus');
+  statusBox.innerHTML = '';
+  if (status) {
+    const dm = DIFF_META[status];
+    const badge = document.createElement('span');
+    badge.className = `diff-badge ${dm.cls} detail-diff-badge`;
+    badge.textContent = `基线对比：${dm.label}`;
+    statusBox.appendChild(badge);
+  }
+
+  const issue = after || before;
   $('detailTitle').textContent = (ISSUE_META[issue.type] || { label: '问题' }).label;
   $('detailMessage').textContent = issue.message;
 
+  // 路径切换标签（详情变化 / 已修复 时可查看基线中的旧路径）
+  const tabs = $('detailPathTabs');
+  const canBefore = !!before && status !== 'new';
+  const canAfter = !!after && status !== 'fixed';
+  if (status && (canBefore || canAfter)) {
+    tabs.hidden = false;
+    tabs.innerHTML = '';
+    const mkTab = (mode, label, enabled) => {
+      const b = document.createElement('button');
+      b.className = 'path-tab' + (state.detailPathMode === mode ? ' active' : '');
+      b.textContent = label;
+      b.disabled = !enabled;
+      if (enabled) b.addEventListener('click', () => {
+        state.detailPathMode = mode;
+        renderDetail(item);
+      });
+      tabs.appendChild(b);
+    };
+    mkTab('after', '当前路径', canAfter);
+    mkTab('before', `基线路径（${fmtTime(before && state.baseline && state.baseline.savedAt)}）`, canBefore);
+  } else {
+    tabs.hidden = true;
+  }
+
+  // 文案前后对比
+  const msgBox = $('detailMessage');
+  if (status === 'changed' && item.changes.includes('message') && before && after) {
+    msgBox.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-diff';
+    wrap.innerHTML = `
+      <div class="msg-diff-row before"><span class="msg-diff-tag">基线</span><span></span></div>
+      <div class="msg-diff-row after"><span class="msg-diff-tag">当前</span><span></span></div>`;
+    const rows = wrap.querySelectorAll('.msg-diff-row span:last-child');
+    rows[0].textContent = before.message;
+    rows[1].textContent = after.message;
+    msgBox.appendChild(wrap);
+  }
+
   // 路径
+  const showAfter = state.detailPathMode !== 'before' || !canBefore;
+  const pathIssue = showAfter ? after : before;
+  const knownVars = (showAfter ? state.analysis : (state.baseline && state.baseline.knownVars)) || [];
   const pathBox = $('detailPath');
   pathBox.innerHTML = '';
-  if (!issue.path || !issue.path.length) {
+  if (!pathIssue.path || !pathIssue.path.length) {
     pathBox.innerHTML = `<div class="path-node scene blocked">
       <span class="pn-title">∅ 没有任何可达路径通向此处</span>
       <div style="font-size:11px;color:var(--muted);margin-top:3px">从起点出发，不存在任何选项链可以到达该场景（可能是孤岛场景）。</div>
     </div>`;
   } else {
-    issue.path.forEach((node, i) => {
+    pathIssue.path.forEach((node, i) => {
       if (node.kind === 'scene') {
         const div = document.createElement('div');
         const cls = ['path-node', 'scene'];
         if (i === 0) cls.push('start');
         if (node.blockedEntry) cls.push('blocked');
         div.className = cls.join(' ');
-        const isLast = i === issue.path.length - 1;
+        const isLast = i === pathIssue.path.length - 1;
         const badge = i === 0 ? '<span class="badge badge-ok">起点</span>'
           : node.hypothetical ? '<span class="badge badge-warn">假设到达（选项实际无法触发）</span>'
           : node.blockedEntry ? '<span class="badge badge-err">前置条件不成立</span>'
@@ -584,7 +839,7 @@ function renderDetail(issue) {
         `;
         div.querySelector('.pn-title').textContent = node.title || node.sceneId;
         div.querySelector('.pn-id').textContent = node.sceneId;
-        div.insertAdjacentHTML('beforeend', stateChips(node.state, state.analysis.knownVars));
+        div.insertAdjacentHTML('beforeend', stateChips(node.state, knownVars));
         pathBox.appendChild(div);
       } else {
         const div = document.createElement('div');
@@ -595,23 +850,23 @@ function renderDetail(issue) {
         const prefix = node.broken ? '✕ ' : node.entryBlocked ? '⛔ ' : node.deadEnd ? '🔒 ' : '';
         div.textContent = `${prefix}选项 ${node.optionIndex + 1}「${node.optionText || ''}」${targetTxt}${node.deadEnd ? '（条件不成立，无法选择）' : ''}`;
         if (node.stateAfter) {
-          div.insertAdjacentHTML('beforeend', stateChips(node.stateAfter, state.analysis.knownVars));
+          div.insertAdjacentHTML('beforeend', stateChips(node.stateAfter, knownVars));
         }
         pathBox.appendChild(div);
       }
     });
   }
 
-  // 未满足条件
+  // 未满足条件（基线快照不保留解释树，仅当前结果可展示）
   const wrap = $('detailUnmetWrap');
-  if (issue.unmet) {
+  if (after && after.unmet && showAfter) {
     wrap.hidden = false;
     $('detailUnmet').innerHTML = '';
-    $('detailUnmet').appendChild(renderExprNode(issue.unmet));
-    const flips = collectFlips(issue.unmet);
+    $('detailUnmet').appendChild(renderExprNode(after.unmet));
+    const flips = collectFlips(after.unmet);
     const fix = $('detailFix');
-    if (issue.unmet.feasible === false) {
-      const cv = issue.unmet.conflicts || [];
+    if (after.unmet.feasible === false) {
+      const cv = after.unmet.conflicts || [];
       fix.innerHTML = `⚠️ 该条件<b>逻辑上不可满足</b>：${cv.length ? `变量 ${cv.map((v) => `<code>${v}</code>`).join('、')} 被同时要求为真和为假；` : '不存在任何变量取值能使它成立；'}请修改条件表达式，而不是调整状态赋值。`;
       fix.style.background = 'var(--danger-bg)';
       fix.style.color = '#8a2b2b';
@@ -619,7 +874,7 @@ function renderDetail(issue) {
       fix.style.background = '';
       fix.style.color = '';
       fix.innerHTML = `最少只需让以下变量取反即可满足：${flips.map((v) => `<b><code>${v}</code></b>`).join('、')}。请检查路径上的状态赋值是否缺失或冲突。`;
-    } else if (issue.unmet.feasible === null) {
+    } else if (after.unmet.feasible === null) {
       fix.style.background = '';
       fix.style.color = '';
       fix.innerHTML = '条件涉及变量较多，未做完整可满足性枚举；请人工核对子条件。';
@@ -702,6 +957,9 @@ function bindGlobalEvents() {
   });
   $('btnAnalyze').addEventListener('click', () => runAnalysis(state.dirty));
   $('btnCloseDetail').addEventListener('click', () => $('detailPanel').hidden = true);
+  $('btnSaveBaseline').addEventListener('click', saveBaseline);
+  $('btnRunCompare').addEventListener('click', runCompare);
+  $('btnClearBaseline').addEventListener('click', clearBaseline);
 
   // Ctrl/Cmd + S 保存
   document.addEventListener('keydown', (e) => {

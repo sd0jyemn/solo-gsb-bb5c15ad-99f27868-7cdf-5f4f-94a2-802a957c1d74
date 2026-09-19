@@ -13,6 +13,10 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const SAMPLES_DIR = process.env.SAMPLES_DIR || path.join(__dirname, '..', 'samples');
 const SEED_ON_START = process.env.SEED_ON_START !== 'false';
 
+function newToken() {
+  return crypto.randomBytes(8).toString('hex');
+}
+
 function ensureDataDir() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -36,6 +40,8 @@ function listStories() {
           startScene: raw.startScene || null,
           sceneCount: (raw.scenes || []).length,
           variableCount: (raw.variables || []).length,
+          hasBaseline: !!(raw.baseline && Array.isArray(raw.baseline.issues)),
+          baselineSavedAt: raw.baseline && raw.baseline.savedAt || null,
           createdAt: raw.createdAt,
           updatedAt: raw.updatedAt,
         };
@@ -58,6 +64,39 @@ function writeAtomic(file, data) {
   const tmp = `${file}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
   fs.renameSync(tmp, file);
+}
+
+function newId() {
+  return crypto.randomBytes(6).toString('hex');
+}
+
+/**
+ * 保存分析基线：以传入的剧情（通常是编辑中的草稿）覆盖剧情内容，
+ * 同时写入基线快照。返回规整后的完整记录。
+ */
+function saveStoryWithBaseline(id, story, baseline) {
+  const existing = getStory(id);
+  if (!existing) throw Object.assign(new Error('剧情不存在'), { status: 404 });
+  const now = new Date().toISOString();
+  const record = normalize({
+    ...story,
+    id,
+    baseline,
+    createdAt: existing.createdAt,
+    updatedAt: now,
+  });
+  writeAtomic(storyPath(id), record);
+  return record;
+}
+
+/** 清除基线（剧情内容保持不变） */
+function clearBaseline(id) {
+  const existing = getStory(id);
+  if (!existing) throw Object.assign(new Error('剧情不存在'), { status: 404 });
+  if (!existing.baseline) return existing;
+  const record = normalize({ ...existing, baseline: null, updatedAt: new Date().toISOString() });
+  writeAtomic(storyPath(id), record);
+  return record;
 }
 
 function newId() {
@@ -104,6 +143,22 @@ function normalize(input) {
     .map((a) => ({ variable: String(a.variable || '').trim(), value: !!a.value }))
     .filter((a) => a.variable);
 
+  // 选项 UID：基线指纹依赖“选项身份”而非数组下标。
+  // 输入中的合法且未重复的 UID 予以保留；缺失 / 非法 / 重复则重新生成。
+  const usedUids = new Set();
+  const uidRe = /^[A-Za-z0-9_-]{4,40}$/;
+  const collectUid = (uid) => {
+    const u = String(uid || '').trim();
+    if (uidRe.test(u) && !usedUids.has(u)) {
+      usedUids.add(u);
+      return u;
+    }
+    let gen;
+    do { gen = `opt-${newToken()}`; } while (usedUids.has(gen));
+    usedUids.add(gen);
+    return gen;
+  };
+
   const scenes = (input.scenes || []).map((s) => ({
     id: String(s.id || '').trim(),
     title: s.title || '',
@@ -111,6 +166,7 @@ function normalize(input) {
     precondition: s.precondition || '',
     assigns: normAssigns(s.assigns),
     options: (s.options || []).map((o) => ({
+      uid: collectUid(o.uid),
       text: o.text || '',
       condition: o.condition || '',
       target: (o.target || '').trim(),
@@ -125,8 +181,42 @@ function normalize(input) {
     startScene: (input.startScene || '').trim(),
     variables,
     scenes,
+    baseline: sanitizeBaseline(input.baseline),
     createdAt: input.createdAt,
     updatedAt: input.updatedAt,
+  };
+}
+
+/**
+ * 校验基线快照（基线由服务端 analyze 后生成，但导入的 JSON 也可能携带）。
+ * 无效则丢弃（返回 null），保证持久化文件中不会出现脏基线。
+ */
+function sanitizeBaseline(raw) {
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.issues)) return null;
+  const issues = raw.issues
+    .filter((i) => i && typeof i === 'object' && typeof i.fingerprint === 'string')
+    .map((i) => ({
+      type: typeof i.type === 'string' ? i.type : 'error',
+      severity: i.severity === 'warning' ? 'warning' : 'error',
+      code: typeof i.code === 'string' ? i.code : undefined,
+      message: typeof i.message === 'string' ? i.message : '',
+      sceneId: typeof i.sceneId === 'string' ? i.sceneId : undefined,
+      optionIndex: Number.isInteger(i.optionIndex) ? i.optionIndex : undefined,
+      optionUid: typeof i.optionUid === 'string' ? i.optionUid : null,
+      targetSceneId: typeof i.targetSceneId === 'string' ? i.targetSceneId : undefined,
+      fingerprint: i.fingerprint,
+      distance: Number.isFinite(i.distance) ? i.distance : null,
+      path: Array.isArray(i.path) ? i.path.filter((n) => n && typeof n === 'object') : [],
+      _pathSig: typeof i._pathSig === 'string' ? i._pathSig : '',
+    }));
+  if (!issues.length) return null;
+  return {
+    savedAt: typeof raw.savedAt === 'string' ? raw.savedAt : new Date().toISOString(),
+    storyTitle: typeof raw.storyTitle === 'string' ? raw.storyTitle : '',
+    startScene: typeof raw.startScene === 'string' ? raw.startScene : '',
+    knownVars: Array.isArray(raw.knownVars) ? raw.knownVars.filter((v) => typeof v === 'string') : [],
+    counts: raw.counts && typeof raw.counts === 'object' ? raw.counts : {},
+    issues,
   };
 }
 
@@ -161,7 +251,10 @@ module.exports = {
   createStory,
   updateStory,
   deleteStory,
+  saveStoryWithBaseline,
+  clearBaseline,
   normalize,
+  sanitizeBaseline,
   seedSamples,
   newId,
 };

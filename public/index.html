@@ -106,6 +106,22 @@
           <h2>一致性分析</h2>
           <button id="btnAnalyze" class="btn btn-small btn-primary">重新分析</button>
         </div>
+
+        <div id="baselineBar" class="baseline-bar">
+          <button id="btnSaveBaseline" class="btn btn-small btn-primary">📌 保存分析基线</button>
+          <div id="baselineInfo" class="baseline-info"></div>
+        </div>
+
+        <div id="diffBar" class="diff-bar" hidden>
+          <div id="diffSummary" class="diff-summary"></div>
+          <div class="diff-actions">
+            <button id="btnRunCompare" class="btn btn-small">⇄ 运行对比</button>
+            <button id="btnClearBaseline" class="btn btn-small btn-danger">删除基线</button>
+          </div>
+          <div id="diffFilters" class="diff-filters"></div>
+          <div id="diffStale" class="diff-stale" hidden>⚠ 剧情已修改，当前对比结果可能过期，请重新「运行对比」</div>
+        </div>
+
         <div id="analysisStats" class="stats"></div>
         <ul id="issueList" class="issue-list"></ul>
       </section>
@@ -115,9 +131,11 @@
           <h2 id="detailTitle">问题详情</h2>
           <button id="btnCloseDetail" class="btn btn-small">✕</button>
         </div>
+        <div id="detailStatus"></div>
         <p id="detailMessage" class="detail-message"></p>
         <div class="detail-section">
           <h3>最接近的可达路径</h3>
+          <div id="detailPathTabs" class="path-tabs" hidden></div>
           <div id="detailPath" class="path-view"></div>
         </div>
         <div id="detailUnmetWrap" class="detail-section" hidden>
